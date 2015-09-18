@@ -37,11 +37,14 @@ import org.apache.synapse.core.axis2.Axis2MessageContext;
 import org.apache.synapse.rest.AbstractHandler;
 import org.apache.synapse.rest.RESTConstants;
 import org.apache.synapse.transport.nhttp.NhttpConstants;
+import org.wso2.carbon.apimgt.api.APIManagementException;
+import org.wso2.carbon.apimgt.api.model.Tier;
 import org.wso2.carbon.apimgt.gateway.handlers.Utils;
 import org.wso2.carbon.apimgt.gateway.handlers.security.*;
 import org.wso2.carbon.apimgt.gateway.internal.ServiceReferenceHolder;
 import org.wso2.carbon.apimgt.impl.APIConstants;
 import org.wso2.carbon.apimgt.impl.dto.VerbInfoDTO;
+import org.wso2.carbon.apimgt.impl.utils.APIUtil;
 import org.wso2.carbon.context.PrivilegedCarbonContext;
 import org.wso2.carbon.throttle.core.*;
 import org.wso2.carbon.throttle.core.factory.ThrottleContextFactory;
@@ -186,15 +189,18 @@ public class APIThrottleHandler extends AbstractHandler {
                 }
             }
         }
-
-        if (!canAccess) {
-            handleThrottleOut(messageContext);
-            return false;
+        // If isThrottledOutIgnored property is set in message context, a throttle out scenario has occurred
+        // at some level of Role Based Throttling. However throttle out was ignored based on the attributes
+        // of throttling tier and allow it to flow as a normal message.
+        // We call handleThrottleOut in this particular scenario only to capture those request messages as throttled out
+        // to include them in statistics.
+        if (!canAccess || (!isResponse && messageContext.getProperty("isThrottleOutIgnored") != null)) {
+            return handleThrottleOut(messageContext, canAccess);
         }
         return true;
     }
 
-    private void handleThrottleOut(MessageContext messageContext) {
+    private boolean handleThrottleOut(MessageContext messageContext, boolean canAccess) {
         messageContext.setProperty(SynapseConstants.ERROR_CODE, 900800);
         messageContext.setProperty(SynapseConstants.ERROR_MESSAGE, "Message throttled out");
 
@@ -203,17 +209,22 @@ public class APIThrottleHandler extends AbstractHandler {
         if (sequence != null && !sequence.mediate(messageContext)) {
             // If needed user should be able to prevent the rest of the fault handling
             // logic from getting executed
-            return;
+            return false;
         }
 
-        // By default we send a 503 response back
-        if (messageContext.isDoingPOX() || messageContext.isDoingGET()) {
-            Utils.setFaultPayload(messageContext, getFaultPayload());
+        if (!canAccess) {
+            // By default we send a 503 response back
+            if (messageContext.isDoingPOX() || messageContext.isDoingGET()) {
+                Utils.setFaultPayload(messageContext, getFaultPayload());
+            } else {
+                Utils.setSOAPFault(messageContext, "Server", "Message Throttled Out", "You have exceeded your quota");
+            }
+            Utils.sendFault(messageContext, HttpStatus.SC_SERVICE_UNAVAILABLE);
+            return false;
         } else {
-            Utils.setSOAPFault(messageContext, "Server", "Message Throttled Out",
-                               "You have exceeded your quota");
+            log.info("Message throttle out ignored");
+            return true;
         }
-           Utils.sendFault(messageContext, HttpStatus.SC_SERVICE_UNAVAILABLE);
     }
 
     private OMElement getFaultPayload() {
@@ -443,7 +454,7 @@ public class APIThrottleHandler extends AbstractHandler {
                 }
             } else {
                 log.warn("No authentication context information found on the request - " +
-                         "Throttling not applied");
+                        "Throttling not applied");
                 return true;
             }
 
@@ -468,6 +479,9 @@ public class APIThrottleHandler extends AbstractHandler {
                 }
 
                 AccessInformation info = null;
+                //This variable is used to keep track of the tier under which AccessInformation data were retrieved
+                //It is required for evaluating throttle out conditions in each level
+                String currentThrottleTier = null;
                 //If application level throttling is applied
                 if (applicationRoleId != null) {
 
@@ -480,6 +494,7 @@ public class APIThrottleHandler extends AbstractHandler {
                     //First throttle by application
                     try {
                         info = applicationRoleBasedAccessController.canAccess(applicationThrottleContext, applicationId, applicationRoleId);
+                        currentThrottleTier = applicationRoleId;
                         if (log.isDebugEnabled()) {
                             log.debug("Throttle by Application " + applicationId);
                             log.debug("Allowed = " + info != null ? info.isAccessAllowed() : "false");
@@ -512,8 +527,22 @@ public class APIThrottleHandler extends AbstractHandler {
                                 }
                             }
                         }
-                        canAccess = false;
-                        return canAccess;
+
+                        //If access is not allowed, then check ignoreThrottleOut attribute availability
+                        //if throttle out reason is exceeding allocated quota
+                        canAccess =
+                                hasAccessIgnoringThrottleOut(info.getFaultReason(), authorizedUser, currentThrottleTier);
+
+                        if (canAccess) {
+                            //Add isThrottleOutIgnored property to the context for identifying whether this is
+                            //a message originally throttled out ignored it due to ignoreThrottleOut attribute
+                            if (synCtx.getProperty("isThrottleOutIgnored") == null) {
+                                synCtx.setProperty("isThrottleOutIgnored", true);
+                            }
+                        } else {
+                            return canAccess;
+                        }
+
                     }
                 }
 
@@ -563,6 +592,7 @@ public class APIThrottleHandler extends AbstractHandler {
                                     resourceContext.setThrottleId(id + "resource");
                                 }
                                 info = roleBasedAccessController.canAccess(resourceContext, resourceAndHTTPVerbKey, resourceAndHTTPVerbThrottlingTier);
+                                currentThrottleTier = resourceAndHTTPVerbThrottlingTier;
                             }
                         } catch (ThrottleException e) {
                             log.warn("Exception occurred while performing resource" +
@@ -592,8 +622,20 @@ public class APIThrottleHandler extends AbstractHandler {
                                     }
                                 }
                             }
-                            canAccess = false;
-                            return canAccess;
+                            //If access is not allowed, then check ignoreThrottleOut attribute availability
+                            //if throttle out reason is exceeding allocated quota
+                            canAccess =
+                                    hasAccessIgnoringThrottleOut(info.getFaultReason(), authorizedUser, currentThrottleTier);
+
+                            if (canAccess) {
+                                //Add isThrottleOutIgnored property to the context for identifying whether this is
+                                //a message originally throttled out ignored it due to ignoreThrottleOut attribute
+                                if (synCtx.getProperty("isThrottleOutIgnored") == null) {
+                                    synCtx.setProperty("isThrottleOutIgnored", true);
+                                }
+                            } else {
+                                return canAccess;
+                            }
                         }
                     } else {
                         log.warn("Unable to find the throttle policy for role.");
@@ -643,6 +685,7 @@ public class APIThrottleHandler extends AbstractHandler {
                             (info == null || info.isAccessAllowed())) {
                             //Throttle by access token
                             info = roleBasedAccessController.canAccess(context, apiKey, consumerRoleID);
+                            currentThrottleTier = consumerRoleID;
                         }
                     } catch (ThrottleException e) {
                         log.warn("Exception occurred while performing role " +
@@ -671,7 +714,20 @@ public class APIThrottleHandler extends AbstractHandler {
                                 }
                             }
                         }
-                        canAccess = false;
+                        //If access is not allowed, then check ignoreThrottleOut attribute availability
+                        //if throttle out reason is exceeding allocated quota
+                        canAccess =
+                                hasAccessIgnoringThrottleOut(info.getFaultReason(), authorizedUser, currentThrottleTier);
+
+                        if (canAccess) {
+                            //Add isThrottleOutIgnored property to the context for identifying whether this is
+                            //a message originally throttled out ignored it due to ignoreThrottleOut attribute
+                            if (synCtx.getProperty("isThrottleOutIgnored") == null) {
+                                synCtx.setProperty("isThrottleOutIgnored", true);
+                            }
+                        } else {
+                            return canAccess;
+                        }
                     }
                 } else {
                     log.warn("Unable to find the throttle policy for role: " + roleID);
@@ -679,6 +735,39 @@ public class APIThrottleHandler extends AbstractHandler {
             }
         }
         return canAccess;
+    }
+
+    /**
+     * Check whether throttle out can be ignored for the request for the current throttle level
+     *
+     * @param throttleOutReason  Reason for throttle out
+     * @param username Username
+     * @param throttleTier  Current throttle tier
+     * @return  whether throttle out can be ignored
+     */
+    private boolean hasAccessIgnoringThrottleOut(String throttleOutReason, String username, String throttleTier){
+        boolean canAccessIgnoringThrottleOut = false;
+        if (throttleOutReason.contains("exceeded the allocated quota")) {
+            Map<String, Tier> availableTiers = null;
+            try {
+                availableTiers = APIUtil.getTiers(APIUtil.getTenantId(username));
+            } catch (APIManagementException e) {
+                log.error("Error during retrieving tiers", e);
+            }
+            if (availableTiers != null) {
+                Tier currentTier = availableTiers.get(throttleTier);
+                if (currentTier != null) {
+                    if (currentTier.getTierAttributes() != null) {
+                        Object ignoreThrottleAttributeVal = currentTier.getTierAttributes()
+                                .get("StopOnLimit");
+                        if ("false".equalsIgnoreCase(ignoreThrottleAttributeVal.toString())) {
+                            canAccessIgnoringThrottleOut = true;
+                        }
+                    }
+                }
+            }
+        }
+        return canAccessIgnoringThrottleOut;
     }
 
     private void initThrottle(MessageContext synCtx, ConfigurationContext cc) {
