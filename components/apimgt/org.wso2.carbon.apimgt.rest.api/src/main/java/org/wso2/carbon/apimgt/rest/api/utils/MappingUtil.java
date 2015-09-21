@@ -14,7 +14,7 @@
  *  limitations under the License.
  */
 
-package org.wso2.carbon.apimgt.rest.api.impl;
+package org.wso2.carbon.apimgt.rest.api.utils;
 
 import org.apache.commons.lang.StringUtils;
 import org.wso2.carbon.apimgt.api.APIDefinition;
@@ -38,7 +38,7 @@ import java.util.Set;
 
 public class MappingUtil {
 
-    protected static APIDTO fromAPItoDTO(org.wso2.carbon.apimgt.api.model.API model) throws APIManagementException {
+    public static APIDTO fromAPItoDTO(org.wso2.carbon.apimgt.api.model.API model) throws APIManagementException {
 
         APIProvider apiProvider = APIManagerFactory.getInstance().getAPIProvider(model.getId().getProviderName());
 
@@ -124,7 +124,7 @@ public class MappingUtil {
         return dto;
     }
 
-    protected static org.wso2.carbon.apimgt.api.model.API fromDTOtoAPI(APIDTO dto) throws APIManagementException {
+    public static org.wso2.carbon.apimgt.api.model.API fromDTOtoAPI(APIDTO dto) throws APIManagementException {
 
         APIProvider apiProvider = APIManagerFactory.getInstance().getAPIProvider(dto.getProvider());
         APIDefinition definitionFromSwagger20 = new APIDefinitionFromSwagger20();

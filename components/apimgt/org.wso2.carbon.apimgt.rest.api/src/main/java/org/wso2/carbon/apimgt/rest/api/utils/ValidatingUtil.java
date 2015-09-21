@@ -16,7 +16,7 @@
  * /
  */
 
-package org.wso2.carbon.apimgt.rest.api.impl;
+package org.wso2.carbon.apimgt.rest.api.utils;
 
 import org.wso2.carbon.apimgt.rest.api.dto.APIDTO;
 
