@@ -249,11 +249,12 @@ public class APIGatewayManager {
                     }
 
                     APIGatewayAdminClient client = new APIGatewayAdminClient(api.getId(), environment);
-                    if(!APIConstants.APIType.WS.toString().equals(api.getType())) {
-                        if (client.getApi(tenantDomain, api.getId()) != null) {
+                    if (client.getApi(tenantDomain, api.getId()) != null) {
+                        if (!APIConstants.APIType.WS.toString().equals(api.getType())) {
+
                             if (debugEnabled) {
                                 log.debug("Removing API " + api.getId().getApiName() + " From environment " +
-                                        environment.getName());
+                                          environment.getName());
                             }
                             String operation = "delete";
 
@@ -261,13 +262,13 @@ public class APIGatewayManager {
                             undeployCustomSequences(api, tenantDomain, environment);
 
                             setSecureVaultProperty(api, tenantDomain, environment, operation);
+                        } else {
+                            String fileName = api.getContext().replace('/', '-');
+                            String[] fileNames = new String[2];
+                            fileNames[0] = ENDPOINT_PRODUCTION + fileName;
+                            fileNames[1] = ENDPOINT_SANDBOX + fileName;
+                            client.undeployWSApi(fileNames);
                         }
-                    } else {
-                        String fileName = api.getContext().replace('/', '-');
-                        String[] fileNames = new String[2];
-                        fileNames[0] = ENDPOINT_PRODUCTION + fileName;
-                        fileNames[1] = ENDPOINT_SANDBOX + fileName;
-                        client.undeployWSApi(fileNames);
                     }
 
                     if (api.isPublishedDefaultVersion()) {
